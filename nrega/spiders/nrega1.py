@@ -1,10 +1,7 @@
-import scrapy
-import requests
-from scrapy import Selector
-import json
-import os
+import scrapy,requests,json,os,logging
 import pandas as pd
-import logging
+from io import BytesIO
+from scrapy import Selector
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -12,29 +9,18 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 import time
 
+chrome_options = Options()
+chrome_options.add_argument('--headless')
+chrome_options.add_argument('--no-sandbox')
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 class MySpider(scrapy.Spider):
-    name = "nrega"
-
-    custom_settings = {
-        'DOWNLOAD_DELAY': 2,  # Adjust delay as necessary
-    }
+    name = "nrega1"
     
-    def __init__(self, *args, **kwargs):
-        super(MySpider, self).__init__(*args, **kwargs)
-        self.chrome_options = Options()
-        self.chrome_options.add_argument('--headless')
-        self.chrome_options.add_argument('--no-sandbox')
-        self.asp_net_session_id = self.get_new_cookies()
-        self.count = 0
-        self.df = pd.read_excel('2.xlsx') 
-        self.links = self.df['lin'].tolist()
-        self.json_filename = 'combined_data.json'
-        self.all_data = self.load_existing_data(self.json_filename)
-        self.not_scraped_filename = 'not_scraped.json'
-        self.not_scraped_data = self.load_existing_data(self.not_scraped_filename)
-
     def get_new_cookies(self):
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.chrome_options)
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         asp_net_session_id = None
         try:
             driver.get('https://nregastrep.nic.in/netnrega/loginframegp.aspx?lflag=eng&page=C&state_code=05&Digest=WTBLudWe5FkJHTnLLorVEQ')
@@ -96,13 +82,30 @@ class MySpider(scrapy.Spider):
                 return json.load(file)
         return []
 
+    def load_excel_from_github(self, url):
+        response = requests.get(url)
+        response.raise_for_status()  # Ensure we notice bad responses
+        file_bytes = BytesIO(response.content)
+        return pd.read_excel(file_bytes)
+
+    def __init__(self, *args, **kwargs):
+        super(MySpider, self).__init__(*args, **kwargs)
+        github_excel_url = 'https://github.com/kathiravanmani05/nrega/raw/main/2.xlsx'  # Change this to your actual file URL
+        self.df = self.load_excel_from_github(github_excel_url)
+        self.links = self.df['lin'].tolist()
+        self.json_filename = 'combined_data.json'
+        self.all_data = self.load_existing_data(self.json_filename)
+        self.not_scraped_filename = 'not_scraped.json'
+        self.not_scraped_data = self.load_existing_data(self.not_scraped_filename)
+        self.asp_net_session_id = self.get_new_cookies()
+        self.count = 0
+
     def start_requests(self):
-        for url in self.links[:5]:
+        for url in self.links[:5]:  # Adjust as needed
             yield scrapy.Request(url=url, callback=self.parse,meta={'url':url})
 
     def parse(self, response):
         url = response.meta['url']
-        self.logger.info(f"Processing URL: {response.url}")
         if self.count % 500 == 0 and self.count != 0:
             self.asp_net_session_id = self.get_new_cookies()
 
