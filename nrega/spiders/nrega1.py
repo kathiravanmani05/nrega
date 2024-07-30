@@ -1,31 +1,51 @@
-import scrapy,requests,json,os,logging
+import scrapy,requests
+import json
+import re
+import os
 import pandas as pd
-from io import BytesIO
-from scrapy import Selector
+import warnings
+from scrapy.selector import Selector
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 import time
-
-chrome_options = Options()
-chrome_options.add_argument('--headless')
-chrome_options.add_argument('--no-sandbox')
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import logging
 
 class MySpider(scrapy.Spider):
-    name = "nrega1"
-    
+    name = 'nrega1'
+    start_urls = ['https://nregastrep.nic.in']  # This will be populated later
+
+  
+
+
+    def __init__(self, *args, **kwargs):
+        super(MySpider, self).__init__(*args, **kwargs)
+        self.asp_net_session_id = self.get_new_cookies()
+        self.count = 0
+        self.load_links_from_excel()
+        self.json_filename = 'combined_data1.json'
+        self.all_data = self.load_existing_data(self.json_filename)
+        self.not_scraped_filename = 'not_scraped.json'
+        self.not_scraped_data = self.load_existing_data(self.not_scraped_filename)
+
+    def load_links_from_excel(self):
+        df = pd.read_excel('MUZAFFARPUR.xlsx')
+        self.start_urls = df['link'].tolist()[0:10000]
+
     def get_new_cookies(self):
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
         asp_net_session_id = None
         try:
             driver.get('https://nregastrep.nic.in/netnrega/loginframegp.aspx?lflag=eng&page=C&state_code=05&Digest=WTBLudWe5FkJHTnLLorVEQ')
             time.sleep(2)
-            
+
             def select_option(xpath):
                 element = driver.find_element(By.XPATH, xpath)
                 if element:
@@ -37,14 +57,16 @@ class MySpider(scrapy.Spider):
             select_option('//*[@name="ctl00$ContentPlaceHolder1$ddlBlock"]/option[2]')
             select_option('//*[@name="ctl00$ContentPlaceHolder1$ddlPanchayat"]/option[2]')
             select_option('//*[@value="Proceed"]')
-            
+
             cookies = driver.get_cookies()
             for cookie in cookies:
                 if cookie['name'] == 'ASP.NET_SessionId':
                     asp_net_session_id = cookie['value']
+                    print(asp_net_session_id)
                     break
         except Exception as e:
-            self.logger.error(f"Error fetching cookies: {e}")
+            pass
+            #logging.error(f"Error fetching cookies: {e}")
         finally:
             driver.quit()
         return asp_net_session_id
@@ -58,13 +80,14 @@ class MySpider(scrapy.Spider):
                 if response.status_code == 200:
                     return response
                 elif response.status_code == 503:
-                    self.logger.warning("Service Unavailable. Waiting for an hour before retrying...")
+                    logging.warning("Service Unavailable. Waiting for 10 minutes before retrying...")
+                    print("Service Unavailable. Waiting for 10 minutes before retrying...")
                     time.sleep(600)
                     retries += 1
                 else:
                     response.raise_for_status()
             except requests.RequestException as e:
-                self.logger.error(f"Request failed: {e}")
+                logging.error(f"Request failed: {e}")
                 retries += 1
         return None
 
@@ -82,30 +105,9 @@ class MySpider(scrapy.Spider):
                 return json.load(file)
         return []
 
-    def load_excel_from_github(self, url):
-        response = requests.get(url)
-        response.raise_for_status()  # Ensure we notice bad responses
-        file_bytes = BytesIO(response.content)
-        return pd.read_excel(file_bytes)
-
-    def __init__(self, *args, **kwargs):
-        super(MySpider, self).__init__(*args, **kwargs)
-        github_excel_url = 'https://github.com/kathiravanmani05/nrega/raw/main/2.xlsx'  # Change this to your actual file URL
-        self.df = self.load_excel_from_github(github_excel_url)
-        self.links = self.df['lin'].tolist()
-        self.json_filename = 'combined_data.json'
-        self.all_data = self.load_existing_data(self.json_filename)
-        self.not_scraped_filename = 'not_scraped.json'
-        self.not_scraped_data = self.load_existing_data(self.not_scraped_filename)
-        self.asp_net_session_id = self.get_new_cookies()
-        self.count = 0
-
-    def start_requests(self):
-        for url in self.links[:5]:  # Adjust as needed
-            yield scrapy.Request(url=url, callback=self.parse,meta={'url':url})
-
     def parse(self, response):
-        url = response.meta['url']
+        url = response.url
+        #time.sleep(0.1)
         if self.count % 500 == 0 and self.count != 0:
             self.asp_net_session_id = self.get_new_cookies()
 
@@ -126,17 +128,29 @@ class MySpider(scrapy.Spider):
             'sec-ch-ua-platform': '"Windows"'
         }
 
-        data = self.fetch_url(response.url, headers)
-        if not data:
-            self.logger.error(f"Failed to retrieve {response.url} after multiple attempts.")
-            self.not_scraped_data.append({'url': response.url, 'reason': 'Failed to retrieve after multiple attempts'})
-            self.save_to_json(self.not_scraped_filename, self.not_scraped_data)
-            return
+        data = self.fetch_url(url, headers)
+
+        attempts = 0
+        while data and "File is under process, please wait for some time" in data.text:
+            logging.info("File is under process. Waiting for 1 minute before retrying...")
+            time.sleep(30)
+            self.asp_net_session_id = self.get_new_cookies()
+            headers['Cookie'] = f'ASP.NET_SessionId={self.asp_net_session_id}'
+            data = self.fetch_url(url, headers)
+            attempts += 1
+            if attempts >= 20:
+                logging.error(f"Failed to retrieve {url} after multiple attempts.")
+                self.not_scraped_data.append({'url': url, 'reason': 'Failed to retrieve after multiple attempts'})
+                break
 
         self.count += 1
         response = Selector(text=data.text)
         try:
             job_card_no = self.safe_extract_first(response.xpath('//*[contains(text(),"Job card No.:")]/following::td[1]/font/b/text()'))
+            if job_card_no:
+                print(job_card_no)
+            else:
+                print("None")
             name_head_household = self.safe_extract_first(response.xpath('//*[@id="lbl_house"]/text()'))
             name_father_or_husband = self.safe_extract_first(response.xpath('//*[@id="lbl_FATH_HUS"]/text()'))
             category = self.safe_extract_first(response.xpath('//*[contains(text(),"Category:")]/following::td[1]/b/font/text()'))
@@ -172,9 +186,8 @@ class MySpider(scrapy.Spider):
             }
 
             name_rows = response.xpath('//*[@id="GridView4"]//tr')
-
             if len(name_rows) > 0:
-                for row in range(4, len(name_rows)+1, 2):
+                for row in range(4, len(name_rows) + 1, 2):
                     name = self.safe_extract_first(response.xpath(f'//*[@id="GridView4"]//tr[{row}]/td[2]/text()'))
                     gender = self.safe_extract_first(response.xpath(f'//*[@id="GridView4"]//tr[{row}]/td[3]/text()'))
                     age = self.safe_extract_first(response.xpath(f'//*[@id="GridView4"]//tr[{row}]/td[4]/text()'))
@@ -185,10 +198,11 @@ class MySpider(scrapy.Spider):
                         'age': age,
                         'bank_po': bank_po
                     })
+
             name_rows = response.xpath('//*[@id="GridView1"]//tr')
 
             if len(name_rows) > 0:
-                for row in range(4, len(name_rows), 2):
+                for row in range(4, len(name_rows) + 1,2):
                     sno = self.safe_extract_first(response.xpath(f'//*[@id="GridView1"]//tr[{row}]/td[1]/text()'))
                     demand_id = self.safe_extract_first(response.xpath(f'//*[@id="GridView1"]//tr[{row}]/td[2]/text()'))
                     applicant_name = self.safe_extract_first(response.xpath(f'//*[@id="GridView1"]//tr[{row}]/td[3]/text()'))
@@ -203,9 +217,8 @@ class MySpider(scrapy.Spider):
                     })
 
             name_rows = response.xpath('//*[@id="GridView2"]//tr')
-
             if len(name_rows) > 0:
-                for row in range(4, len(name_rows), 2):
+                for row in range(4, len(name_rows)+1, 2):
                     sno = self.safe_extract_first(response.xpath(f'//*[@id="GridView2"]//tr[{row}]/td[1]/text()'))
                     demand_id = self.safe_extract_first(response.xpath(f'//*[@id="GridView2"]//tr[{row}]/td[2]/text()'))
                     applicant_name = self.safe_extract_first(response.xpath(f'//*[@id="GridView2"]//tr[{row}]/td[3]/text()'))
@@ -221,7 +234,6 @@ class MySpider(scrapy.Spider):
                         'work_name': work_name
                     })
 
-
             name_rows = response.xpath('//*[@id="GridView3"]//tr')
 
             if len(name_rows) > 0:
@@ -231,7 +243,7 @@ class MySpider(scrapy.Spider):
                     request_month_year = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[3]/text()'))
                     requested_days = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[4]/text()'))
                     work_name = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[5]/a/text()'))
-                    msr_no = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[6]/text()'))
+                    msr_no = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[6]/a/text()'))
                     payment_earned = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[7]/text()'))
                     payment_due = self.safe_extract_first(response.xpath(f'//*[@id="GridView3"]//tr[{row}]/td[8]/text()'))
                     
@@ -247,11 +259,9 @@ class MySpider(scrapy.Spider):
                     })
 
             self.all_data.append(url_data)
-            # Save the updated all_data to the JSON file
-            self.save_to_json(self.json_filename, self.all_data)
-            #self.logger.info(f"Data for {response.url} saved to '{self.json_filename}'")
-
         except Exception as e:
-            self.logger.error(f"Error processing {response.url}: {e}")
-            self.not_scraped_data.append({'url': response.url, 'reason': str(e)})
+            logging.error(f"Error parsing {url}: {e}")
+            self.not_scraped_data.append({'url': url, 'reason': str(e)})
+        finally:
+            self.save_to_json(self.json_filename, self.all_data)
             self.save_to_json(self.not_scraped_filename, self.not_scraped_data)
