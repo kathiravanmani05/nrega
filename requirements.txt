@@ -1,0 +1,5 @@
+scrapy
+selenium
+requests
+pandas
+webdriver_manager
